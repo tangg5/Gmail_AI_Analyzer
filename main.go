@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"golang.org/x/oauth2"
@@ -38,30 +40,99 @@ func setupGmailService() {
 		tok = getTokenFromWeb(config)
 		saveToken(tokFile, tok)
 	}
-	//create Gmail Service
-	client := config.Client(ctx, tok)
-	srv, err = gmail.NewService(ctx, option.WithHTTPClient(client))
-	if err != nil {
-		log.Fatalf("Unable to create Gmail service: %v", err)
-	}
+	var client *http.Client
+	maxAttempts := 5
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		transport := &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout:   600 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			TLSHandshakeTimeout: 60 * time.Second, // 添加TLS握手超时
+			DisableKeepAlives:   false,
+		}
+		client = &http.Client{
+			Transport: transport,
+			Timeout:   600 * time.Second,
+		}
 
+		//create Gmail Service
+		client = config.Client(ctx, tok)
+		srv, err = gmail.NewService(ctx, option.WithHTTPClient(client))
+		if err == nil {
+			// log.Fatalf("Unable to create Gmail service: %v", err)
+			break
+		}
+		if attempt < maxAttempts {
+			log.Printf("Attempt %d to create Gmail service failed: %v. Retrying in 10 seconds...", attempt, err)
+			time.Sleep(10 * time.Second)
+		}
+
+	}
+	if err != nil {
+		log.Fatalf("Unable to create Gmail service after %d retries: %v", maxAttempts, err)
+	}
 }
 
+// func getTokenFromWeb(config *oauth2.Config) *oauth2.Token {
+// 	//state-token will be replaced with a dynamic token later on
+// 	authURL := config.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
+// 	//hardcode authorization for now
+// 	fmt.Printf("Go to this link and authorize: %v\nThen paste the code here: ", authURL)
+
+//		var authCode string
+//		if _, err := fmt.Scan(&authCode); err != nil {
+//			log.Fatalf("Unable  to read authorization code: %v", err)
+//		}
+//		fmt.Println("Authorization code received.")
+//		tok, err := config.Exchange(context.TODO(), authCode)
+//		fmt.Println("Token received.")
+//		if err != nil {
+//			log.Fatalf("Unable to acquire token: %v", err)
+//		}
+//		return tok
+//	}
 func getTokenFromWeb(config *oauth2.Config) *oauth2.Token {
-	//state-token will be replaced with a dynamic token later on
 	authURL := config.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
-	//hardcode authorization for now
 	fmt.Printf("Go to this link and authorize: %v\nThen paste the code here: ", authURL)
 
 	var authCode string
 	if _, err := fmt.Scan(&authCode); err != nil {
-		log.Fatalf("Unable  to read authorization code: %v", err)
+		log.Fatalf("Unable to read authorization code: %v", err)
 	}
-	tok, err := config.Exchange(context.TODO(), authCode)
-	if err != nil {
-		log.Fatalf("Unable to acquire token: %v", err)
+	fmt.Println("Authorization code received:", authCode)
+
+	var tok *oauth2.Token
+	maxAttempts := 5
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		var err error
+		transport := &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout:   600 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			TLSHandshakeTimeout: 60 * time.Second,
+			DisableKeepAlives:   false,
+		}
+		client := &http.Client{
+			Transport: transport,
+			Timeout:   600 * time.Second,
+		}
+		fmt.Println("Authorization code received.")
+		tok, err = config.Exchange(context.WithValue(context.TODO(), oauth2.HTTPClient, client), authCode)
+		if err == nil {
+			fmt.Println("Token received successfully.")
+			return tok
+		}
+		lastErr = err
+		log.Printf("Attempt %d to exchange token failed: %v. Retrying in 10 seconds...", attempt, err)
+		if attempt < maxAttempts {
+			time.Sleep(10 * time.Second)
+		}
 	}
-	return tok
+	log.Fatalf("Unable to acquire token after %d retries: %v", maxAttempts, lastErr)
+	return nil
 }
 
 func tokenFromFile(file string) (*oauth2.Token, error) {

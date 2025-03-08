@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -158,16 +159,41 @@ func getEmails(emailid string) (*gmail.Message, error) {
 	}
 	return msg, nil
 }
+func decodeEmailBody(msg *gmail.Message) string {
+	for _, part := range msg.Payload.Parts {
+		if part.MimeType == "text/plain" || part.MimeType == "text/html" {
+			data, err := base64.URLEncoding.DecodeString(part.Body.Data)
+			if err == nil {
+				return string(data)
+			}
+		}
+	}
 
-//	func decodeEmail(msg *gmail.Message) (string, error) {
-//		for _, part := range msg.Payload.Parts {
-//			if part.MimeType == "text/plain" || part.MimeType == "text/html" {
-//				data, _ := base64.URLEncoding.DecodeString(part.Body.Data)
-//				return string(data)
-//			}
-//		}
-//		return ""
-//	}
+	if msg.Payload.Body != nil && msg.Payload.Body.Data != "" {
+		data, err := base64.URLEncoding.DecodeString(msg.Payload.Body.Data)
+		if err == nil {
+			return string(data)
+		}
+	}
+	return "No readable content"
+}
+
+func extractEmailInfo(msg *gmail.Message) (string, string, string, string) {
+	var from, subject, date, body string
+	for _, header := range msg.Payload.Headers {
+		switch header.Name {
+		case "From":
+			from = header.Value
+		case "Subject":
+			subject = header.Value
+		case "Date":
+			date = header.Value
+		}
+	}
+	body = decodeEmailBody(msg)
+	return from, subject, date, body
+}
+
 func main() {
 	r := gin.Default()
 	setupGmailService()
@@ -182,7 +208,28 @@ func main() {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		c.JSON(http.StatusOK, emails)
+		var detailedEmails []struct {
+			ID      string `json:"id"`
+			From    string `json:"from"`
+			Subject string `json:"subject"`
+			Date    string `json:"date"`
+			Body    string `json:"body"`
+		}
+		for _, email := range emails {
+			msg, err := getEmails(email.Id)
+			if err != nil {
+				continue
+			}
+			from, subject, date, body := extractEmailInfo(msg)
+			detailedEmails = append(detailedEmails, struct {
+				ID      string `json:"id"`
+				From    string `json:"from"`
+				Subject string `json:"subject"`
+				Date    string `json:"date"`
+				Body    string `json:"body"`
+			}{email.Id, from, subject, date, body})
+		}
+		c.JSON(http.StatusOK, detailedEmails)
 	})
 	fmt.Println("Server started on http://localhost:8080")
 	r.Run(":8080")

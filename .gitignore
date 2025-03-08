@@ -7,3 +7,4 @@ vendor/
 *.log
 *.tmp
 credentials.json
+token.json

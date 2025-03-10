@@ -49,7 +49,7 @@ func setupGmailService() {
 				Timeout:   600 * time.Second,
 				KeepAlive: 30 * time.Second,
 			}).DialContext,
-			TLSHandshakeTimeout: 60 * time.Second, // 添加TLS握手超时
+			TLSHandshakeTimeout: 60 * time.Second,
 			DisableKeepAlives:   false,
 		}
 		client = &http.Client{
@@ -178,7 +178,7 @@ func decodeEmailBody(msg *gmail.Message) string {
 	return "No readable content"
 }
 
-func extractEmailInfo(msg *gmail.Message) (string, string, string, string) {
+func extractEmailInfo(msg *gmail.Message) (string, string, string, string, []string) {
 	var from, subject, date, body string
 	for _, header := range msg.Payload.Headers {
 		switch header.Name {
@@ -191,17 +191,13 @@ func extractEmailInfo(msg *gmail.Message) (string, string, string, string) {
 		}
 	}
 	body = decodeEmailBody(msg)
-	return from, subject, date, body
+	labels := msg.LabelIds
+	return from, subject, date, body, labels
 }
 
 func main() {
 	r := gin.Default()
 	setupGmailService()
-	// r.GET("/ping", func(c *gin.Context) {
-	// 	c.JSON(http.StatusOK, gin.H{
-	// 		"message": "pong",
-	// 	})
-	// })
 	r.GET("/emails", func(c *gin.Context) {
 		emails, err := listEmails(10)
 		if err != nil {
@@ -209,27 +205,29 @@ func main() {
 			return
 		}
 		var detailedEmails []struct {
-			ID      string `json:"id"`
-			From    string `json:"from"`
-			Subject string `json:"subject"`
-			Date    string `json:"date"`
-			Body    string `json:"body"`
+			ID      string   `json:"id"`
+			From    string   `json:"from"`
+			Subject string   `json:"subject"`
+			Date    string   `json:"date"`
+			Body    string   `json:"body"`
+			Labels  []string `json:"labels"`
 		}
 		for _, email := range emails {
 			msg, err := getEmails(email.Id)
 			if err != nil {
 				continue
 			}
-			from, subject, date, body := extractEmailInfo(msg)
+			from, subject, date, body, labels := extractEmailInfo(msg)
 			detailedEmails = append(detailedEmails, struct {
-				ID      string `json:"id"`
-				From    string `json:"from"`
-				Subject string `json:"subject"`
-				Date    string `json:"date"`
-				Body    string `json:"body"`
-			}{email.Id, from, subject, date, body})
+				ID      string   `json:"id"`
+				From    string   `json:"from"`
+				Subject string   `json:"subject"`
+				Date    string   `json:"date"`
+				Body    string   `json:"body"`
+				Labels  []string `json:"labels"`
+			}{email.Id, from, subject, date, body, labels})
 		}
-		c.JSON(http.StatusOK, detailedEmails)
+		c.IndentedJSON(http.StatusOK, detailedEmails)
 	})
 	fmt.Println("Server started on http://localhost:8080")
 	r.Run(":8080")

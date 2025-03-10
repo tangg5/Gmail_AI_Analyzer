@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -193,6 +194,62 @@ func extractEmailInfo(msg *gmail.Message) (string, string, string, string, []str
 	body = decodeEmailBody(msg)
 	labels := msg.LabelIds
 	return from, subject, date, body, labels
+}
+
+type Prompt struct {
+	Text string `json:"text"`
+}
+
+type GeminiRequest struct {
+	Model  string `json:"model"`
+	Prompt Prompt `json:"prompt"`
+}
+
+type GeminiResponse struct {
+	Candidates []struct {
+		Output string `json:"output"`
+	} `json:"candidates"`
+}
+
+func callGemini(prompt string) (string, error) {
+	apiKey := os.Getenv("GEMINI_API_KEY")
+	if apiKey == "" {
+		return "", fmt.Errorf("GEMINI_API_KEY not set")
+	}
+
+	reqBody := GeminiRequest{
+		Model: "gemini-pro",
+		Prompt: Prompt{
+			Text: prompt,
+		},
+	}
+
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal request: %v", err)
+	}
+
+	req, err := http.NewRequest("POST", "https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateText?key="+apiKey, bytes.NewBuffer(body))
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to call Gemini API: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var result GeminiResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("failed to decode response: %v", err)
+	}
+	if len(result.Candidates) == 0 {
+		return "", fmt.Errorf("no response from Gemini")
+	}
+	return result.Candidates[0].Output, nil
 }
 
 func main() {

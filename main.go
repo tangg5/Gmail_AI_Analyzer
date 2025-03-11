@@ -10,9 +10,12 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"golang.org/x/net/html"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/gmail/v1"
@@ -162,23 +165,45 @@ func getEmails(emailid string) (*gmail.Message, error) {
 }
 func decodeEmailBody(msg *gmail.Message) string {
 	for _, part := range msg.Payload.Parts {
-		if part.MimeType == "text/plain" || part.MimeType == "text/html" {
+		if part.MimeType == "text/plain" {
 			data, err := base64.URLEncoding.DecodeString(part.Body.Data)
 			if err == nil {
 				return string(data)
 			}
+		} else if part.MimeType == "text/html" {
+			data, err := base64.URLEncoding.DecodeString(part.Body.Data)
+			if err == nil {
+				return extractTextFromHTML(string(data))
+			}
 		}
 	}
-
 	if msg.Payload.Body != nil && msg.Payload.Body.Data != "" {
 		data, err := base64.URLEncoding.DecodeString(msg.Payload.Body.Data)
 		if err == nil {
-			return string(data)
+			return extractTextFromHTML(string(data))
 		}
 	}
 	return "No readable content"
 }
 
+func extractTextFromHTML(htmlStr string) string {
+	doc, err := html.Parse(strings.NewReader(htmlStr))
+	if err != nil {
+		return htmlStr
+	}
+	var text string
+	var f func(*html.Node)
+	f = func(n *html.Node) {
+		if n.Type == html.TextNode {
+			text += n.Data + " "
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			f(c)
+		}
+	}
+	f(doc)
+	return strings.TrimSpace(text)
+}
 func extractEmailInfo(msg *gmail.Message) (string, string, string, string, []string) {
 	var from, subject, date, body string
 	for _, header := range msg.Payload.Headers {
@@ -252,6 +277,23 @@ func callGemini(prompt string) (string, error) {
 	return result.Candidates[0].Output, nil
 }
 
+func analyzeEmailWithGemini(body string) (string, error) {
+	prompt := fmt.Sprintf("Analyze the following email content and summarize its key points in a concise manner:\n\n%s", body)
+	summary, err := callGemini(prompt)
+	if err != nil {
+		return "", fmt.Errorf("failed to analyze email: %v", err)
+	}
+	return summary, nil
+}
+
+func generateReplyWithGemini(body string) (string, error) {
+	prompt := fmt.Sprintf("Generate a polite and professional reply for the following email, if this email is an advertisement or promotion, then please include where the email was sent from and the purpose:\n\n%s", body)
+	reply, err := callGemini(prompt)
+	if err != nil {
+		return "", fmt.Errorf("failed to generate reply: %v", err)
+	}
+	return reply, nil
+}
 func main() {
 	r := gin.Default()
 	setupGmailService()
@@ -261,6 +303,53 @@ func main() {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
+		var wg sync.WaitGroup
+		detailedEmailsChan := make(chan struct {
+			ID      string   `json:"id"`
+			From    string   `json:"from"`
+			Subject string   `json:"subject"`
+			Date    string   `json:"date"`
+			Body    string   `json:"body"`
+			Labels  []string `json:"labels"`
+			Summary string   `json:"summary"`
+			Reply   string   `json:"reply"`
+		}, len(emails))
+
+		for _, email := range emails {
+			wg.Add(1)
+			go func(email *gmail.Message) {
+				defer wg.Done()
+				msg, err := getEmails(email.Id)
+				if err != nil {
+					return
+				}
+				from, subject, date, body, labels := extractEmailInfo(msg)
+				summary, err := analyzeEmailWithGemini(body)
+				if err != nil {
+					summary = "Failed to analyze email: " + err.Error()
+				}
+				reply, err := generateReplyWithGemini(body)
+				if err != nil {
+					reply = "Failed to generate reply: " + err.Error()
+				}
+				detailedEmailsChan <- struct {
+					ID      string   `json:"id"`
+					From    string   `json:"from"`
+					Subject string   `json:"subject"`
+					Date    string   `json:"date"`
+					Body    string   `json:"body"`
+					Labels  []string `json:"labels"`
+					Summary string   `json:"summary"`
+					Reply   string   `json:"reply"`
+				}{email.Id, from, subject, date, body, labels, summary, reply}
+			}(email)
+		}
+
+		go func() {
+			wg.Wait()
+			close(detailedEmailsChan)
+		}()
+
 		var detailedEmails []struct {
 			ID      string   `json:"id"`
 			From    string   `json:"from"`
@@ -268,21 +357,11 @@ func main() {
 			Date    string   `json:"date"`
 			Body    string   `json:"body"`
 			Labels  []string `json:"labels"`
+			Summary string   `json:"summary"`
+			Reply   string   `json:"reply"`
 		}
-		for _, email := range emails {
-			msg, err := getEmails(email.Id)
-			if err != nil {
-				continue
-			}
-			from, subject, date, body, labels := extractEmailInfo(msg)
-			detailedEmails = append(detailedEmails, struct {
-				ID      string   `json:"id"`
-				From    string   `json:"from"`
-				Subject string   `json:"subject"`
-				Date    string   `json:"date"`
-				Body    string   `json:"body"`
-				Labels  []string `json:"labels"`
-			}{email.Id, from, subject, date, body, labels})
+		for email := range detailedEmailsChan {
+			detailedEmails = append(detailedEmails, email)
 		}
 		c.IndentedJSON(http.StatusOK, detailedEmails)
 	})

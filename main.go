@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -239,8 +240,10 @@ type GeminiResponse struct {
 func callGemini(prompt string) (string, error) {
 	apiKey := os.Getenv("GEMINI_API_KEY")
 	if apiKey == "" {
+		log.Println("GEMINI_API_KEY is not set")
 		return "", fmt.Errorf("GEMINI_API_KEY not set")
 	}
+	log.Printf("Calling Gemini API with prompt: %s", prompt)
 
 	reqBody := GeminiRequest{
 		Model: "gemini-pro",
@@ -248,13 +251,12 @@ func callGemini(prompt string) (string, error) {
 			Text: prompt,
 		},
 	}
-
 	body, err := json.Marshal(reqBody)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal request: %v", err)
 	}
 
-	req, err := http.NewRequest("POST", "https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateText?key="+apiKey, bytes.NewBuffer(body))
+	req, err := http.NewRequest("POST", "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key="+apiKey, bytes.NewBuffer(body))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %v", err)
 	}
@@ -263,22 +265,29 @@ func callGemini(prompt string) (string, error) {
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
+		log.Printf("Gemini API call failed: %v", err)
 		return "", fmt.Errorf("failed to call Gemini API: %v", err)
 	}
 	defer resp.Body.Close()
 
+	log.Printf("Gemini API status code: %d", resp.StatusCode)
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	log.Printf("Gemini API raw response: %s", string(bodyBytes))
+
 	var result GeminiResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(bytes.NewReader(bodyBytes)).Decode(&result); err != nil {
+		log.Printf("Failed to decode Gemini response: %v", err)
 		return "", fmt.Errorf("failed to decode response: %v", err)
 	}
 	if len(result.Candidates) == 0 {
+		log.Println("No candidates in Gemini response")
 		return "", fmt.Errorf("no response from Gemini")
 	}
 	return result.Candidates[0].Output, nil
 }
 
 func analyzeEmailWithGemini(body string) (string, error) {
-	prompt := fmt.Sprintf("Analyze the following email content and summarize its key points in a concise manner:\n\n%s", body)
+	prompt := fmt.Sprintf("Analyze the following email content and summarize its key points in a concise manner, if this email is a question or a request, please include the question or request :\n\n%s", body)
 	summary, err := callGemini(prompt)
 	if err != nil {
 		return "", fmt.Errorf("failed to analyze email: %v", err)
@@ -287,7 +296,7 @@ func analyzeEmailWithGemini(body string) (string, error) {
 }
 
 func generateReplyWithGemini(body string) (string, error) {
-	prompt := fmt.Sprintf("Generate a polite and professional reply for the following email, if this email is an advertisement or promotion, then please include where the email was sent from and the purpose:\n\n%s", body)
+	prompt := fmt.Sprintf("Generate a polite and professional reply for the following email, if this email is an advertisement or promotion, then do nothing and let it go:\n\n%s", body)
 	reply, err := callGemini(prompt)
 	if err != nil {
 		return "", fmt.Errorf("failed to generate reply: %v", err)

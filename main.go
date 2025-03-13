@@ -227,13 +227,24 @@ type Prompt struct {
 }
 
 type GeminiRequest struct {
-	Model  string `json:"model"`
-	Prompt Prompt `json:"prompt"`
+	Contents []Content `json:"contents"`
+}
+
+type Content struct {
+	Parts []Part `json:"parts"`
+}
+
+type Part struct {
+	Text string `json:"text"`
 }
 
 type GeminiResponse struct {
 	Candidates []struct {
-		Output string `json:"output"`
+		Content struct {
+			Parts []struct {
+				Text string `json:"text"`
+			} `json:"parts"`
+		} `json:"content"`
 	} `json:"candidates"`
 }
 
@@ -246,9 +257,14 @@ func callGemini(prompt string) (string, error) {
 	log.Printf("Calling Gemini API with prompt: %s", prompt)
 
 	reqBody := GeminiRequest{
-		Model: "gemini-pro",
-		Prompt: Prompt{
-			Text: prompt,
+		Contents: []Content{
+			{
+				Parts: []Part{
+					{
+						Text: prompt,
+					},
+				},
+			},
 		},
 	}
 	body, err := json.Marshal(reqBody)
@@ -256,7 +272,7 @@ func callGemini(prompt string) (string, error) {
 		return "", fmt.Errorf("failed to marshal request: %v", err)
 	}
 
-	req, err := http.NewRequest("POST", "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key="+apiKey, bytes.NewBuffer(body))
+	req, err := http.NewRequest("POST", "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro-latest:generateContent?key="+apiKey, bytes.NewBuffer(body))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %v", err)
 	}
@@ -283,7 +299,7 @@ func callGemini(prompt string) (string, error) {
 		log.Println("No candidates in Gemini response")
 		return "", fmt.Errorf("no response from Gemini")
 	}
-	return result.Candidates[0].Output, nil
+	return result.Candidates[0].Content.Parts[0].Text, nil
 }
 
 func analyzeEmailWithGemini(body string) (string, error) {

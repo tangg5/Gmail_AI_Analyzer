@@ -222,10 +222,6 @@ func extractEmailInfo(msg *gmail.Message) (string, string, string, string, []str
 	return from, subject, date, body, labels
 }
 
-type Prompt struct {
-	Text string `json:"text"`
-}
-
 type GeminiRequest struct {
 	Contents []Content `json:"contents"`
 }

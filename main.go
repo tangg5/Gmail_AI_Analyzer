@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,12 @@ import (
 )
 
 var srv *gmail.Service
+var (
+	emailRe = regexp.MustCompile(`(?i)\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b`)
+	phoneRe = regexp.MustCompile(`(?i)\b(\+?\d{1,3}[-.\s]?)?(\d{3}[-.\s]?\d{3}[-.\s]?\d{4})\b`)
+	nameRe  = regexp.MustCompile(`(?i)\b([A-Z][a-z]+)\s([A-Z][a-z]+)\b`)
+	ccRe    = regexp.MustCompile(`\b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b`)
+)
 
 func setupGmailService() {
 	ctx := context.Background()
@@ -297,9 +304,19 @@ func callGemini(prompt string) (string, error) {
 	}
 	return result.Candidates[0].Content.Parts[0].Text, nil
 }
-
-func analyzeEmailWithGemini(body string) (string, error) {
-	prompt := fmt.Sprintf("Analyze the following email content and summarize its key points in a concise manner, if this email is a question or a request, please include the question or request :\n\n%s", body)
+func sanitizeContent(from, body string) (string, string) {
+	sanitizedFrom := emailRe.ReplaceAllString(from, "[email redacted]")
+	sanitizedBody := emailRe.ReplaceAllString(body, "[email redacted]")
+	sanitizedBody = phoneRe.ReplaceAllString(sanitizedBody, "[phone redacted]")
+	sanitizedBody = nameRe.ReplaceAllString(sanitizedBody, "[name redacted]")
+	sanitizedBody = ccRe.ReplaceAllString(sanitizedBody, "[credit card redacted]")
+	sanitizedFrom = strings.TrimSpace(sanitizedFrom)
+	sanitizedBody = strings.TrimSpace(sanitizedBody)
+	return sanitizedFrom, sanitizedBody
+}
+func analyzeEmailWithGemini(from, body string) (string, error) {
+	sanitizedFrom, sanitizedBody := sanitizeContent(from, body)
+	prompt := fmt.Sprintf("Analyze the following email content and summarize its key points in a concise manner, if this email is a question or a request, please include the question or request :\n\nFrom: %s\n\n%s", sanitizedFrom, sanitizedBody)
 	summary, err := callGemini(prompt)
 	if err != nil {
 		return "", fmt.Errorf("failed to analyze email: %v", err)
@@ -307,8 +324,9 @@ func analyzeEmailWithGemini(body string) (string, error) {
 	return summary, nil
 }
 
-func generateReplyWithGemini(body string) (string, error) {
-	prompt := fmt.Sprintf("Generate a polite and professional reply for the following email, if this email is an advertisement or promotion, then do nothing and let it go:\n\n%s", body)
+func generateReplyWithGemini(from, body string) (string, error) {
+	sanitizedFrom, sanitizedBody := sanitizeContent(from, body)
+	prompt := fmt.Sprintf("Generate a polite and professional reply for the following email, if this email is an advertisement or promotion, then do nothing and let it go:\n\nFrom: %s\n\n%s", sanitizedFrom, sanitizedBody)
 	reply, err := callGemini(prompt)
 	if err != nil {
 		return "", fmt.Errorf("failed to generate reply: %v", err)
@@ -345,11 +363,11 @@ func main() {
 					return
 				}
 				from, subject, date, body, labels := extractEmailInfo(msg)
-				summary, err := analyzeEmailWithGemini(body)
+				summary, err := analyzeEmailWithGemini(from, body)
 				if err != nil {
 					summary = "Failed to analyze email: " + err.Error()
 				}
-				reply, err := generateReplyWithGemini(body)
+				reply, err := generateReplyWithGemini(from, body)
 				if err != nil {
 					reply = "Failed to generate reply: " + err.Error()
 				}

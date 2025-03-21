@@ -307,9 +307,15 @@ func callGemini(prompt string) (string, error) {
 func sanitizeContent(from, body string) (string, string) {
 	sanitizedFrom := emailRe.ReplaceAllString(from, "[email redacted]")
 	sanitizedBody := emailRe.ReplaceAllString(body, "[email redacted]")
+
 	sanitizedBody = phoneRe.ReplaceAllString(sanitizedBody, "[phone redacted]")
-	sanitizedBody = nameRe.ReplaceAllString(sanitizedBody, "[name redacted]")
 	sanitizedBody = ccRe.ReplaceAllString(sanitizedBody, "[credit card redacted]")
+
+	// sanitizedBody = nameRe.ReplaceAllString(sanitizedBody, "[name redacted]")
+	// sanitizedBody = ccRe.ReplaceAllString(sanitizedBody, "[credit card redacted]")
+	nameRe := regexp.MustCompile(`(?i)(?:Best,|Sincerely,|Regards,|Good Morning,)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)`)
+	sanitizedBody = nameRe.ReplaceAllString(sanitizedBody, "$0 [name redacted]")
+
 	sanitizedFrom = strings.TrimSpace(sanitizedFrom)
 	sanitizedBody = strings.TrimSpace(sanitizedBody)
 	return sanitizedFrom, sanitizedBody

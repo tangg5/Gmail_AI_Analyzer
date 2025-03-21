@@ -363,6 +363,7 @@ func main() {
 					return
 				}
 				from, subject, date, body, labels := extractEmailInfo(msg)
+				sanitizedFrom, sanitizedBody := sanitizeContent(from, body)
 				summary, err := analyzeEmailWithGemini(from, body)
 				if err != nil {
 					summary = "Failed to analyze email: " + err.Error()
@@ -380,7 +381,7 @@ func main() {
 					Labels  []string `json:"labels"`
 					Summary string   `json:"summary"`
 					Reply   string   `json:"reply"`
-				}{email.Id, from, subject, date, body, labels, summary, reply}
+				}{email.Id, sanitizedFrom, subject, date, sanitizedBody, labels, summary, reply}
 			}(email)
 		}
 

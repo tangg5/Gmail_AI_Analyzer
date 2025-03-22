@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 	"golang.org/x/net/html"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -24,6 +25,7 @@ import (
 	"google.golang.org/api/option"
 )
 
+var redisClient *redis.Client
 var srv *gmail.Service
 var (
 	emailRe = regexp.MustCompile(`(?i)\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b`)
@@ -31,6 +33,20 @@ var (
 	nameRe  = regexp.MustCompile(`(?i)\b([A-Z][a-z]+)\s([A-Z][a-z]+)\b`)
 	ccRe    = regexp.MustCompile(`\b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b`)
 )
+
+func initRedis() {
+	redisClient = redis.NewClient(&redis.Options{
+		Addr:     "localhost:6379",
+		Password: "",
+		DB:       0,
+	})
+	ctx := context.Background()
+	_, err := redisClient.Ping(ctx).Result()
+	if err != nil {
+		log.Fatalf("Failed to connect to Redis: %v", err)
+	}
+	log.Println("Connected to Redis successfully")
+}
 
 func setupGmailService() {
 	ctx := context.Background()
@@ -154,13 +170,13 @@ func saveToken(path string, token *oauth2.Token) {
 	}
 }
 
-func listEmails(numofemails int) ([]*gmail.Message, error) {
+func listEmails(numofemails int) ([]*gmail.Message, string, error) {
 	user := "me"
 	r, err := srv.Users.Messages.List(user).MaxResults(int64(numofemails)).Do()
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return r.Messages, nil
+	return r.Messages, r.NextPageToken, nil
 }
 
 func getEmails(emailid string) (*gmail.Message, error) {
@@ -342,12 +358,40 @@ func generateReplyWithGemini(from, body string) (string, error) {
 func main() {
 	r := gin.Default()
 	setupGmailService()
+	initRedis()
+
 	r.GET("/emails", func(c *gin.Context) {
-		emails, err := listEmails(10)
+		ctx := context.Background()
+		cacheKey := "emails:latest"
+		historyKey := "emails:history"
+
+		cachedData, err := redisClient.Get(ctx, cacheKey).Result()
+		cachedHistory, _ := redisClient.Get(ctx, historyKey).Result()
+
+		emails, nextToken, err := listEmails(10)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
+
+		if err == nil && cachedData != "" && cachedHistory == nextToken {
+			var cachedEmails []struct {
+				ID      string   `json:"id"`
+				From    string   `json:"from"`
+				Subject string   `json:"subject"`
+				Date    string   `json:"date"`
+				Body    string   `json:"body"`
+				Labels  []string `json:"labels"`
+				Summary string   `json:"summary"`
+				Reply   string   `json:"reply"`
+			}
+			if err := json.Unmarshal([]byte(cachedData), &cachedEmails); err == nil {
+				c.IndentedJSON(http.StatusOK, cachedEmails)
+				log.Println("Returning cached emails from Redis")
+				return
+			}
+		}
+
 		var wg sync.WaitGroup
 		detailedEmailsChan := make(chan struct {
 			ID      string   `json:"id"`
@@ -409,6 +453,23 @@ func main() {
 		for email := range detailedEmailsChan {
 			detailedEmails = append(detailedEmails, email)
 		}
+
+		jsonData, err := json.Marshal(detailedEmails)
+		if err != nil {
+			log.Printf("Failed to marshal emails: %v", err)
+		} else {
+			err = redisClient.Set(ctx, cacheKey, jsonData, 5*time.Minute).Err()
+			if err != nil {
+				log.Printf("Failed to cache emails in Redis: %v", err)
+			} else {
+				log.Println("Cached emails in Redis")
+			}
+			err = redisClient.Set(ctx, historyKey, nextToken, 5*time.Minute).Err()
+			if err != nil {
+				log.Printf("Failed to cache history in Redis: %v", err)
+			}
+		}
+
 		c.IndentedJSON(http.StatusOK, detailedEmails)
 	})
 	fmt.Println("Server started on http://localhost:8080")

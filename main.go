@@ -355,6 +355,22 @@ func generateReplyWithGemini(from, body string) (string, error) {
 	}
 	return reply, nil
 }
+
+func analyzeAndReplyWithGemini(from, body string) (string, string, error) {
+	sanitizedFrom, sanitizedBody := sanitizeContent(from, body)
+	prompt := fmt.Sprintf("Analyze the following email content and summarize its key points in a concise manner, if this email is a question or a request, please include the question or request. Then, generate a polite and professional reply for the email, if it is an advertisement or promotion, then do nothing and let it go:\n\nFrom: %s\n\n%s", sanitizedFrom, sanitizedBody)
+	response, err := callGemini(prompt)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to analyze and reply: %v", err)
+	}
+
+	parts := strings.SplitN(response, "\nReply: ", 2)
+	if len(parts) != 2 {
+		return parts[0], "", nil
+	}
+	return parts[0], parts[1], nil
+}
+
 func main() {
 	r := gin.Default()
 	setupGmailService()
@@ -404,24 +420,34 @@ func main() {
 			Reply   string   `json:"reply"`
 		}, len(emails))
 
+		semaphore := make(chan struct{}, 2)
+
 		for _, email := range emails {
 			wg.Add(1)
+			semaphore <- struct{}{}
 			go func(email *gmail.Message) {
 				defer wg.Done()
+				defer func() { <-semaphore }()
+
 				msg, err := getEmails(email.Id)
 				if err != nil {
 					return
 				}
 				from, subject, date, body, labels := extractEmailInfo(msg)
 				sanitizedFrom, sanitizedBody := sanitizeContent(from, body)
-				summary, err := analyzeEmailWithGemini(from, body)
+				summary, reply, err := analyzeAndReplyWithGemini(sanitizedFrom, sanitizedBody)
 				if err != nil {
 					summary = "Failed to analyze email: " + err.Error()
-				}
-				reply, err := generateReplyWithGemini(from, body)
-				if err != nil {
 					reply = "Failed to generate reply: " + err.Error()
 				}
+				// summary, err := analyzeEmailWithGemini(from, body)
+				// if err != nil {
+				// 	summary = "Failed to analyze email: " + err.Error()
+				// }
+				// reply, err := generateReplyWithGemini(from, body)
+				// if err != nil {
+				// 	reply = "Failed to generate reply: " + err.Error()
+				// }
 				detailedEmailsChan <- struct {
 					ID      string   `json:"id"`
 					From    string   `json:"from"`
@@ -458,13 +484,13 @@ func main() {
 		if err != nil {
 			log.Printf("Failed to marshal emails: %v", err)
 		} else {
-			err = redisClient.Set(ctx, cacheKey, jsonData, 5*time.Minute).Err()
+			err = redisClient.Set(ctx, cacheKey, jsonData, 2*time.Hour).Err()
 			if err != nil {
 				log.Printf("Failed to cache emails in Redis: %v", err)
 			} else {
 				log.Println("Cached emails in Redis")
 			}
-			err = redisClient.Set(ctx, historyKey, nextToken, 5*time.Minute).Err()
+			err = redisClient.Set(ctx, historyKey, nextToken, 2*time.Hour).Err()
 			if err != nil {
 				log.Printf("Failed to cache history in Redis: %v", err)
 			}

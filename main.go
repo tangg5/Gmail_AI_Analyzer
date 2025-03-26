@@ -384,7 +384,7 @@ func main() {
 		cachedData, err := redisClient.Get(ctx, cacheKey).Result()
 		cachedHistory, _ := redisClient.Get(ctx, historyKey).Result()
 
-		emails, nextToken, err := listEmails(10)
+		emails, nextToken, err := listEmails(5)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return

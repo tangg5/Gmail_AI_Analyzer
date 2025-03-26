@@ -43,9 +43,10 @@ func initRedis() {
 	ctx := context.Background()
 	_, err := redisClient.Ping(ctx).Result()
 	if err != nil {
-		log.Fatalf("Failed to connect to Redis: %v", err)
+		log.Printf("Failed to connect to Redis: %v", err)
+	} else {
+		log.Println("Connected to Redis successfully")
 	}
-	log.Println("Connected to Redis successfully")
 }
 
 func setupGmailService() {
@@ -54,13 +55,14 @@ func setupGmailService() {
 	//read credentials.json
 	b, err := os.ReadFile("credentials.json")
 	if err != nil {
-		log.Fatalf("Unable to read credentials.json: %v", err)
+		log.Printf("Unable to read credentials.json: %v", err)
 	}
 
 	//setup OAuth2
 	config, err := google.ConfigFromJSON(b, gmail.GmailReadonlyScope)
 	if err != nil {
-		log.Fatalf("Unable to parse credentials: %v", err)
+		log.Printf("Unable to parse credentials: %v", err)
+		return
 	}
 	//acquire token
 	tokFile := "token.json"
@@ -99,7 +101,7 @@ func setupGmailService() {
 
 	}
 	if err != nil {
-		log.Fatalf("Unable to create Gmail service after %d retries: %v", maxAttempts, err)
+		log.Printf("Unable to create Gmail service after %d retries: %v", maxAttempts, err)
 	}
 }
 
@@ -375,7 +377,14 @@ func main() {
 	r := gin.Default()
 	setupGmailService()
 	initRedis()
-
+	if srv == nil {
+		log.Println("Gmail service not initialized, exiting...")
+		return
+	}
+	if redisClient == nil {
+		log.Println("Redis client not initialized, exiting...")
+		return
+	}
 	r.GET("/emails", func(c *gin.Context) {
 		ctx := context.Background()
 		cacheKey := "emails:latest"

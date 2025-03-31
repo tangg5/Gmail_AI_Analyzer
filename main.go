@@ -334,18 +334,30 @@ func sanitizeContent(from, body string) (string, string) {
 	nameRe := regexp.MustCompile(`(?i)(?:Best,|Sincerely,|Regards,|Good Morning,)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)`)
 	sanitizedBody = nameRe.ReplaceAllString(sanitizedBody, "$0 [name redacted]")
 
-	sanitizedFrom = strings.TrimSpace(sanitizedFrom)
+	sanitizedBody = strings.ReplaceAll(sanitizedBody, "\r\n", "\n")
+	sanitizedBody = regexp.MustCompile(`\n\s*\n+`).ReplaceAllString(sanitizedBody, "\n")
+	sanitizedBody = regexp.MustCompile(`\s+`).ReplaceAllString(sanitizedBody, " ")
 	sanitizedBody = strings.TrimSpace(sanitizedBody)
+
+	sanitizedFrom = strings.TrimSpace(sanitizedFrom)
 	return sanitizedFrom, sanitizedBody
 }
-func analyzeEmailWithGemini(from, body string) (string, error) {
+func analyzeEmailWithGemini(from, body string) (string, string, error) {
 	sanitizedFrom, sanitizedBody := sanitizeContent(from, body)
-	prompt := fmt.Sprintf("Analyze the following email content and summarize its key points in a concise manner, if this email is a question or a request, please include the question or request :\n\nFrom: %s\n\n%s", sanitizedFrom, sanitizedBody)
-	summary, err := callGemini(prompt)
-	if err != nil {
-		return "", fmt.Errorf("failed to analyze email: %v", err)
+	if len(sanitizedBody) > 5000 {
+		sanitizedBody = sanitizedBody[:5000] + "... [truncated]"
 	}
-	return summary, nil
+	prompt := fmt.Sprintf("Analyze the following email content and summarize its key points in a concise manner, if this email is a question or a request, please include the question or request :\n\nFrom: %s\n\n%s", sanitizedFrom, sanitizedBody)
+	response, err := callGemini(prompt)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to analyze email: %v", err)
+	}
+	parts := strings.SplitN(response, "\nReply: ", 2)
+	if len(parts) != 2 {
+		return parts[0], "", nil
+	}
+	return parts[0], parts[1], nil
+	// return summary, nil
 }
 
 func generateReplyWithGemini(from, body string) (string, error) {
@@ -360,17 +372,23 @@ func generateReplyWithGemini(from, body string) (string, error) {
 
 func analyzeAndReplyWithGemini(from, body string) (string, string, error) {
 	sanitizedFrom, sanitizedBody := sanitizeContent(from, body)
-	prompt := fmt.Sprintf("Analyze the following email content and summarize its key points in a concise manner, if this email is a question or a request, please include the question or request. Then, generate a polite and professional reply for the email, if it is an advertisement or promotion, then do nothing and let it go:\n\nFrom: %s\n\n%s", sanitizedFrom, sanitizedBody)
-	response, err := callGemini(prompt)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to analyze and reply: %v", err)
+	if len(sanitizedBody) > 2000 {
+		sanitizedBody = sanitizedBody[:2000] + "... [truncated]"
 	}
 
-	parts := strings.SplitN(response, "\nReply: ", 2)
-	if len(parts) != 2 {
-		return parts[0], "", nil
+	prompt := fmt.Sprintf("Analyze the following email content and summarize its key points in a concise manner, if this email is a question or a request, please include the question or request:\n\nFrom: %s\n\n%s", sanitizedFrom, sanitizedBody)
+	summary, err := callGemini(prompt)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to analyze: %v", err)
 	}
-	return parts[0], parts[1], nil
+
+	prompt = fmt.Sprintf("Generate a polite and professional reply for the following email, if this email is an advertisement or promotion, then do nothing and let it go:\n\nFrom: %s\n\n%s", sanitizedFrom, sanitizedBody)
+	reply, err := callGemini(prompt)
+	if err != nil {
+		return summary, "", fmt.Errorf("failed to generate reply: %v", err)
+	}
+
+	return summary, reply, nil
 }
 
 func main() {

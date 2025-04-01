@@ -16,7 +16,9 @@ import (
 	"sync"
 	"time"
 
+	"cloud.google.com/go/pubsub"
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/net/html"
 	"golang.org/x/oauth2"
@@ -25,6 +27,13 @@ import (
 	"google.golang.org/api/option"
 )
 
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	},
+}
 var redisClient *redis.Client
 var srv *gmail.Service
 var (
@@ -34,6 +43,68 @@ var (
 	ccRe    = regexp.MustCompile(`\b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b`)
 )
 
+func watchInbox(userID string, topicName string) (string, int64, error) {
+	ctx := context.Background()
+	if srv == nil {
+		return "", 0, fmt.Errorf("Gmail service not initialized")
+	}
+
+	req := &gmail.UsersWatchRequest{
+		LabelIds:            []string{"INBOX"},
+		LabelFilterBehavior: "INCLUDE",
+		TopicName:           topicName,
+	}
+
+	resp, err := srv.Users.Watch(userID, req).Do()
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to set up watch: %v", err)
+	}
+
+	log.Printf("Watch set up successfully: HistoryID=%s, Expiration=%d", resp.HistoryId, resp.Expiration)
+	return resp.HistoryId, resp.Expiration, nil
+}
+
+func subscribeToPubSub(ctx context.Context, redisClient *redis.Client, projectID, subscriptionID string) error {
+	client, err := pubsub.NewClient(ctx, projectID)
+	if err != nil {
+		return fmt.Errorf("failed to create Pub/Sub client: %v", err)
+	}
+	defer client.Close()
+
+	sub := client.Subscription(subscriptionID)
+	exists, err := sub.Exists(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to check subscription existence: %v", err)
+	}
+	if !exists {
+		return fmt.Errorf("subscription %s does not exist", subscriptionID)
+	}
+
+	log.Printf("Subscribing to Pub/Sub subscription: %s", subscriptionID)
+	err = sub.Receive(ctx, func(ctx context.Context, msg *pubsub.Message) {
+		log.Printf("Received Pub/Sub message: %s", string(msg.Data))
+
+		var gmailData struct {
+			EmailAddress string `json:"emailAddress"`
+			HistoryId    string `json:"historyId"`
+		}
+		if err := json.Unmarshal(msg.Data, &gmailData); err != nil {
+			log.Printf("Failed to unmarshal Gmail data: %v", err)
+			msg.Nack()
+			return
+		}
+
+		log.Printf("New email for %s, HistoryId: %s", gmailData.EmailAddress, gmailData.HistoryId)
+
+		redisClient.Publish(ctx, "new_email_channel", string(msg.Data))
+		msg.Ack()
+	})
+	if err != nil {
+		return fmt.Errorf("failed to receive messages: %v", err)
+	}
+
+	return nil
+}
 func initRedis() {
 	redisClient = redis.NewClient(&redis.Options{
 		Addr:     "localhost:6379",
@@ -395,6 +466,7 @@ func main() {
 	r := gin.Default()
 	setupGmailService()
 	initRedis()
+
 	if srv == nil {
 		log.Println("Gmail service not initialized, exiting...")
 		return
@@ -403,6 +475,36 @@ func main() {
 		log.Println("Redis client not initialized, exiting...")
 		return
 	}
+
+	topicName := "projects/x-ripple-452808-i4/topics/gmail-notifications"
+	historyID, expiration, err := watchInbox("me", topicName)
+	if err != nil {
+		log.Fatalf("Failed to set up Gmail watch: %v", err)
+	}
+	log.Printf("Gmail watch set up: HistoryID=%s, Expiration=%d", historyID, expiration)
+
+	go subscribeToPubSub(context.Background(), redisClient, "x-ripple-452808-i4", "gmail-subscription")
+
+	r.GET("/ws", func(c *gin.Context) {
+		conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+		if err != nil {
+			log.Printf("Failed to upgrade to WebSocket: %v", err)
+			return
+		}
+		defer conn.Close()
+
+		ctx := context.Background()
+		pubsub := redisClient.Subscribe(ctx, "new_email_channel")
+		defer pubsub.Close()
+
+		ch := pubsub.Channel()
+		for msg := range ch {
+			if err := conn.WriteMessage(websocket.TextMessage, []byte(msg.Payload)); err != nil {
+				log.Printf("Failed to send WebSocket message: %v", err)
+				return
+			}
+		}
+	})
 	r.GET("/emails", func(c *gin.Context) {
 		ctx := context.Background()
 		cacheKey := "emails:latest"

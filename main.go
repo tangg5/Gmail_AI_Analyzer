@@ -49,19 +49,18 @@ func watchInbox(userID string, topicName string) (string, int64, error) {
 		return "", 0, fmt.Errorf("Gmail service not initialized")
 	}
 
-	req := &gmail.UsersWatchRequest{
-		LabelIds:            []string{"INBOX"},
-		LabelFilterBehavior: "INCLUDE",
-		TopicName:           topicName,
+	req := &gmail.WatchRequest{
+		LabelIds:  []string{"INBOX"},
+		TopicName: topicName,
 	}
 
-	resp, err := srv.Users.Watch(userID, req).Do()
+	resp, err := srv.Users.Watch(userID, req).Context(ctx).Do()
 	if err != nil {
 		return "", 0, fmt.Errorf("failed to set up watch: %v", err)
 	}
 
-	log.Printf("Watch set up successfully: HistoryID=%s, Expiration=%d", resp.HistoryId, resp.Expiration)
-	return resp.HistoryId, resp.Expiration, nil
+	log.Printf("Watch set up successfully: HistoryID=%d, Expiration=%d", resp.HistoryId, resp.Expiration)
+	return fmt.Sprintf("%d", resp.HistoryId), resp.Expiration, nil
 }
 
 func subscribeToPubSub(ctx context.Context, redisClient *redis.Client, projectID, subscriptionID string) error {
@@ -82,33 +81,44 @@ func subscribeToPubSub(ctx context.Context, redisClient *redis.Client, projectID
 	}
 
 	log.Printf("Subscribing to Pub/Sub subscription: %s", subscriptionID)
-	err = sub.Receive(ctx, func(ctx context.Context, msg *pubsub.Message) {
-		log.Printf("Received Pub/Sub message: %s", string(msg.Data))
+	go func() {
+		for {
+			log.Printf("Waiting for Pub/Sub messages on subscription: %s", subscriptionID)
+			err := sub.Receive(ctx, func(ctx context.Context, msg *pubsub.Message) {
+				log.Printf("Received Pub/Sub message: %s", string(msg.Data))
 
-		var gmailData struct {
-			EmailAddress string `json:"emailAddress"`
-			HistoryId    string `json:"historyId"`
+				var gmailData struct {
+					EmailAddress string `json:"emailAddress"`
+					HistoryId    string `json:"historyId"`
+				}
+				if err := json.Unmarshal(msg.Data, &gmailData); err != nil {
+					log.Printf("Failed to unmarshal Gmail data: %v", err)
+					msg.Nack()
+					return
+				}
+
+				log.Printf("New email for %s, HistoryId: %s", gmailData.EmailAddress, gmailData.HistoryId)
+				log.Printf("Publishing message to Redis channel: new_email_channel")
+				result := redisClient.Publish(ctx, "new_email_channel", string(msg.Data))
+				log.Printf("Redis publish result: %v", result)
+				msg.Ack()
+			})
+			if err != nil {
+				log.Printf("Failed to receive messages: %v", err)
+				if ctx.Err() != nil {
+					client.Close()
+					return
+				}
+				time.Sleep(5 * time.Second)
+				continue
+			}
 		}
-		if err := json.Unmarshal(msg.Data, &gmailData); err != nil {
-			log.Printf("Failed to unmarshal Gmail data: %v", err)
-			msg.Nack()
-			return
-		}
-
-		log.Printf("New email for %s, HistoryId: %s", gmailData.EmailAddress, gmailData.HistoryId)
-
-		redisClient.Publish(ctx, "new_email_channel", string(msg.Data))
-		msg.Ack()
-	})
-	client.Close()
-	if err != nil {
-		return fmt.Errorf("failed to receive messages: %v", err)
-	}
+	}()
 
 	return nil
 }
 
-func initRedis() {
+func initRedis() error {
 	redisClient = redis.NewClient(&redis.Options{
 		Addr:     "localhost:6379",
 		Password: "",
@@ -120,14 +130,15 @@ func initRedis() {
 		_, err := redisClient.Ping(ctx).Result()
 		if err == nil {
 			log.Println("Connected to Redis successfully")
-			return
+			return nil
 		}
 		log.Printf("Attempt %d to connect to Redis failed: %v. Retrying in 5 seconds...", attempt, err)
 		if attempt == maxAttempts {
-			log.Fatalf("Failed to connect to Redis after %d attempts: %v", maxAttempts, err)
+			return fmt.Errorf("failed to connect to Redis after %d attempts: %v", maxAttempts, err)
 		}
 		time.Sleep(5 * time.Second)
 	}
+	return nil
 }
 
 func setupGmailService() {
@@ -475,7 +486,10 @@ func analyzeAndReplyWithGemini(from, body string) (string, string, error) {
 func main() {
 	r := gin.Default()
 	setupGmailService()
-	initRedis()
+	// initRedis()
+	if err := initRedis(); err != nil {
+		log.Fatalf("Redis initialization failed: %v", err)
+	}
 
 	if srv == nil {
 		log.Println("Gmail service not initialized, exiting...")
@@ -488,21 +502,25 @@ func main() {
 
 	topicName := "projects/x-ripple-452808-i4/topics/gmail-notifications"
 	historyID, expiration, err := watchInbox("me", topicName)
-	go func() {
-		ticker := time.NewTicker(5 * 24 * time.Hour)
-		for range ticker.C {
-			historyID, expiration, err := watchInbox("me", topicName)
-			if err != nil {
-				log.Printf("Failed to renew watch: %v", err)
-			} else {
-				log.Printf("Watch renewed: HistoryID=%s, Expiration=%d", historyID, expiration)
-			}
-		}
-	}()
 	if err != nil {
 		log.Fatalf("Failed to set up Gmail watch: %v", err)
 	}
 	log.Printf("Gmail watch set up: HistoryID=%s, Expiration=%d", historyID, expiration)
+
+	go func() {
+		ticker := time.NewTicker(5 * 24 * time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			newHistoryID, newExpiration, err := watchInbox("me", topicName)
+			if err != nil {
+				log.Printf("Failed to renew watch: %v", err)
+				continue
+			}
+			historyID = newHistoryID
+			expiration = newExpiration
+			log.Printf("Watch renewed: HistoryID=%s, Expiration=%d", historyID, expiration)
+		}
+	}()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

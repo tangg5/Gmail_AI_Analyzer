@@ -69,14 +69,15 @@ func subscribeToPubSub(ctx context.Context, redisClient *redis.Client, projectID
 	if err != nil {
 		return fmt.Errorf("failed to create Pub/Sub client: %v", err)
 	}
-	defer client.Close()
 
 	sub := client.Subscription(subscriptionID)
 	exists, err := sub.Exists(ctx)
 	if err != nil {
+		client.Close()
 		return fmt.Errorf("failed to check subscription existence: %v", err)
 	}
 	if !exists {
+		client.Close()
 		return fmt.Errorf("subscription %s does not exist", subscriptionID)
 	}
 
@@ -99,12 +100,14 @@ func subscribeToPubSub(ctx context.Context, redisClient *redis.Client, projectID
 		redisClient.Publish(ctx, "new_email_channel", string(msg.Data))
 		msg.Ack()
 	})
+	client.Close()
 	if err != nil {
 		return fmt.Errorf("failed to receive messages: %v", err)
 	}
 
 	return nil
 }
+
 func initRedis() {
 	redisClient = redis.NewClient(&redis.Options{
 		Addr:     "localhost:6379",
@@ -112,11 +115,18 @@ func initRedis() {
 		DB:       0,
 	})
 	ctx := context.Background()
-	_, err := redisClient.Ping(ctx).Result()
-	if err != nil {
-		log.Printf("Failed to connect to Redis: %v", err)
-	} else {
-		log.Println("Connected to Redis successfully")
+	maxAttempts := 5
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		_, err := redisClient.Ping(ctx).Result()
+		if err == nil {
+			log.Println("Connected to Redis successfully")
+			return
+		}
+		log.Printf("Attempt %d to connect to Redis failed: %v. Retrying in 5 seconds...", attempt, err)
+		if attempt == maxAttempts {
+			log.Fatalf("Failed to connect to Redis after %d attempts: %v", maxAttempts, err)
+		}
+		time.Sleep(5 * time.Second)
 	}
 }
 
@@ -478,12 +488,25 @@ func main() {
 
 	topicName := "projects/x-ripple-452808-i4/topics/gmail-notifications"
 	historyID, expiration, err := watchInbox("me", topicName)
+	go func() {
+		ticker := time.NewTicker(5 * 24 * time.Hour)
+		for range ticker.C {
+			historyID, expiration, err := watchInbox("me", topicName)
+			if err != nil {
+				log.Printf("Failed to renew watch: %v", err)
+			} else {
+				log.Printf("Watch renewed: HistoryID=%s, Expiration=%d", historyID, expiration)
+			}
+		}
+	}()
 	if err != nil {
 		log.Fatalf("Failed to set up Gmail watch: %v", err)
 	}
 	log.Printf("Gmail watch set up: HistoryID=%s, Expiration=%d", historyID, expiration)
 
-	go subscribeToPubSub(context.Background(), redisClient, "x-ripple-452808-i4", "gmail-subscription")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go subscribeToPubSub(ctx, redisClient, "x-ripple-452808-i4", "gmail-subscription")
 
 	r.GET("/ws", func(c *gin.Context) {
 		conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
@@ -560,6 +583,17 @@ func main() {
 
 				msg, err := getEmails(email.Id)
 				if err != nil {
+					log.Printf("Failed to get email %s: %v", email.Id, err)
+					detailedEmailsChan <- struct {
+						ID      string   `json:"id"`
+						From    string   `json:"from"`
+						Subject string   `json:"subject"`
+						Date    string   `json:"date"`
+						Body    string   `json:"body"`
+						Labels  []string `json:"labels"`
+						Summary string   `json:"summary"`
+						Reply   string   `json:"reply"`
+					}{email.Id, "", "", "", "", nil, "Failed to fetch email", ""}
 					return
 				}
 				from, subject, date, body, labels := extractEmailInfo(msg)
@@ -569,14 +603,6 @@ func main() {
 					summary = "Failed to analyze email: " + err.Error()
 					reply = "Failed to generate reply: " + err.Error()
 				}
-				// summary, err := analyzeEmailWithGemini(from, body)
-				// if err != nil {
-				// 	summary = "Failed to analyze email: " + err.Error()
-				// }
-				// reply, err := generateReplyWithGemini(from, body)
-				// if err != nil {
-				// 	reply = "Failed to generate reply: " + err.Error()
-				// }
 				detailedEmailsChan <- struct {
 					ID      string   `json:"id"`
 					From    string   `json:"from"`

@@ -98,36 +98,48 @@ func subscribeToPubSub(ctx context.Context, redisClient *redis.Client, projectID
 					return
 				}
 				startHistoryId := lastHistoryId
-				if startHistoryId == 0 {
-					startHistoryId = gmailData.HistoryId - 10
+				if startHistoryId == 0 || startHistoryId >= gmailData.HistoryId {
+					startHistoryId = gmailData.HistoryId - 200
 				}
 				log.Printf("Querying history from StartHistoryId: %d to %d", startHistoryId, gmailData.HistoryId)
-				history, err := srv.Users.History.List("me").StartHistoryId(uint64(startHistoryId)).LabelId("INBOX").Do()
-				if err != nil {
-					log.Printf("Failed to list history: %v", err)
-					msg.Nack()
-					return
+				var history *gmail.ListHistoryResponse
+				for attempt := 1; attempt <= 3; attempt++ {
+					history, err = srv.Users.History.List("me").StartHistoryId(uint64(startHistoryId)).LabelId("INBOX").Do()
+					if err != nil {
+						log.Printf("Attempt %d: Failed to list history: %v", attempt, err)
+						msg.Nack()
+						return
+					}
+					if len(history.History) > 0 {
+						break
+					}
+					log.Printf("Attempt %d: No history records found, retrying in 2 seconds...", attempt)
+					time.Sleep(2 * time.Second)
 				}
+				// history, err := srv.Users.History.List("me").StartHistoryId(uint64(startHistoryId)).LabelId("INBOX").Do()
+				// if err != nil {
+				// 	log.Printf("Failed to list history: %v", err)
+				// 	msg.Nack()
+				// 	return
+				// }
 
 				hasNewMessage := false
 				if len(history.History) == 0 {
 					log.Printf("No history records found for HistoryId: %d", gmailData.HistoryId)
 				}
 				for _, h := range history.History {
-					if h.Id >= uint64(gmailData.HistoryId)-1 && h.Id <= uint64(gmailData.HistoryId) {
-						for _, m := range h.MessagesAdded {
-							log.Printf("New email detected, Message ID: %s", m.Message.Id)
-							hasNewMessage = true
-						}
-						for _, m := range h.MessagesDeleted {
-							log.Printf("Deleted email, Message ID: %s", m.Message.Id)
-						}
-						for _, m := range h.LabelsAdded {
-							log.Printf("Labels added to Message ID: %s, Labels: %v", m.Message.Id, m.LabelIds)
-						}
-						for _, m := range h.LabelsRemoved {
-							log.Printf("Labels removed from Message ID: %s, Labels: %v", m.Message.Id, m.LabelIds)
-						}
+					for _, m := range h.MessagesAdded {
+						log.Printf("New email detected, Message ID: %s, History ID: %d", m.Message.Id, h.Id)
+						hasNewMessage = true
+					}
+					for _, m := range h.MessagesDeleted {
+						log.Printf("Deleted email, Message ID: %s, History ID: %d", m.Message.Id, h.Id)
+					}
+					for _, m := range h.LabelsAdded {
+						log.Printf("Labels added to Message ID: %s, Labels: %v, History ID: %d", m.Message.Id, m.LabelIds, h.Id)
+					}
+					for _, m := range h.LabelsRemoved {
+						log.Printf("Labels removed from Message ID: %s, Labels: %v, History ID: %d", m.Message.Id, m.LabelIds, h.Id)
 					}
 
 				}

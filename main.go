@@ -116,12 +116,6 @@ func subscribeToPubSub(ctx context.Context, redisClient *redis.Client, projectID
 					log.Printf("Attempt %d: No history records found, retrying in 2 seconds...", attempt)
 					time.Sleep(2 * time.Second)
 				}
-				// history, err := srv.Users.History.List("me").StartHistoryId(uint64(startHistoryId)).LabelId("INBOX").Do()
-				// if err != nil {
-				// 	log.Printf("Failed to list history: %v", err)
-				// 	msg.Nack()
-				// 	return
-				// }
 
 				hasNewMessage := false
 				if len(history.History) == 0 {
@@ -129,25 +123,40 @@ func subscribeToPubSub(ctx context.Context, redisClient *redis.Client, projectID
 				}
 				for _, h := range history.History {
 					for _, m := range h.MessagesAdded {
-						log.Printf("New email detected, Message ID: %s, History ID: %d", m.Message.Id, h.Id)
+						log.Printf("Found Added messages, Message ID: %s, History ID: %d", m.Message.Id, h.Id)
 						hasNewMessage = true
 					}
-					for _, m := range h.MessagesDeleted {
-						log.Printf("Deleted email, Message ID: %s, History ID: %d", m.Message.Id, h.Id)
-					}
-					for _, m := range h.LabelsAdded {
-						log.Printf("Labels added to Message ID: %s, Labels: %v, History ID: %d", m.Message.Id, m.LabelIds, h.Id)
-					}
-					for _, m := range h.LabelsRemoved {
-						log.Printf("Labels removed from Message ID: %s, Labels: %v, History ID: %d", m.Message.Id, m.LabelIds, h.Id)
-					}
+					// for _, m := range h.MessagesDeleted {
+					// 	log.Printf("Found Deleted email, Message ID: %s, History ID: %d", m.Message.Id, h.Id)
+					// }
+					// for _, m := range h.LabelsAdded {
+					// 	log.Printf("Found Labels-added-to-Message email ID: %s, Labels: %v, History ID: %d", m.Message.Id, m.LabelIds, h.Id)
+					// }
+					// for _, m := range h.LabelsRemoved {
+					// 	log.Printf("Found Labels-removed email from Message ID: %s, Labels: %v, History ID: %d", m.Message.Id, m.LabelIds, h.Id)
+					// }
 
 				}
 
 				if hasNewMessage {
 					log.Printf("New email for %s, History Id: %d", gmailData.EmailAddress, gmailData.HistoryId)
 					log.Printf("Publishing message to Redis Channel: new_email_channel")
-					publishData, err := json.Marshal(gmailData)
+					var messageIds []string
+					for _, h := range history.History {
+						for _, m := range h.MessagesAdded {
+							messageIds = append(messageIds, m.Message.Id)
+						}
+					}
+					publishDataStruct := struct {
+						EmailAddress string   `json:"emailAddress"`
+						HistoryId    int64    `json:"historyId"`
+						MessageIds   []string `json:"messageIds"`
+					}{
+						EmailAddress: gmailData.EmailAddress,
+						HistoryId:    gmailData.HistoryId,
+						MessageIds:   messageIds,
+					}
+					publishData, err := json.Marshal(publishDataStruct)
 					if err != nil {
 						log.Printf("Failed to marshal publish data: %v", err)
 						msg.Nack()
